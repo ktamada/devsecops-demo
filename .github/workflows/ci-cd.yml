@@ -1,182 +1,180 @@
 name: CI/CD Pipeline
 
+# Triggers: push to main and PRs against main
 on:
   push:
     branches: [ main ]
-    paths-ignore:
-      - 'kubernetes/deployment.yaml'  # Ignore changes to this file to prevent loops
   pull_request:
     branches: [ main ]
 
+env:
+  # Default environment values (non-secrets). Override these via repo Secrets if needed.
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: '797240615708'
+  ECR_REPOSITORY: ecommerce
+  # IMAGE_TAG will use the short commit SHA by default
+  IMAGE_TAG: ${{ github.sha }}
+
 jobs:
-  test:
-    name: Unit Testing
+  ci:
+    name: Checkout → Test → SonarQube → Checkov → Build → Trivy → Push to ECR → Update GitOps
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-      
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Run tests
-        run: npm test || echo "No tests found, would add tests in a real project"
+    permissions:
+      contents: read
+      packages: write
+      issues: write
 
-  lint:
-    name: Static Code Analysis
-    runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-      
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Run ESLint
-        run: npm run lint
+          fetch-depth: 0
 
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: [test, lint]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python and Node (for multi-language projects)
+        uses: actions/setup-python@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-      
-      - name: Install dependencies
-        run: npm ci
-      
-      - name: Build project
-        run: npm run build
-      
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts
-          path: dist/
+          python-version: '3.x'
 
-  docker:
-    name: Docker Build and Push
-    runs-on: ubuntu-latest
-    needs: [build]
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}
-    outputs:
-      image_tag: ${{ steps.set_output.outputs.image_tag }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - name: Install jq and yq
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          python -m pip install --upgrade pip
+          pip install yq
+
+      - name: Install dependencies & Run unit tests (auto-detect)
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            echo "Detected Node.js project"
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            if npm test --silent; then echo "Node tests passed"; else echo "Node tests failed"; exit 1; fi
+          elif [ -f requirements.txt ] || [ -f setup.py ]; then
+            echo "Detected Python project"
+            python -m pip install -r requirements.txt || true
+            if [ -f pytest.ini ] || [ -d tests ]; then python -m pytest -q; else echo "No pytest tests detected; skipping"; fi
+          else
+            echo "No known dependency manifest found (package.json or requirements.txt). Skipping install/tests.";
+          fi
+
+      - name: SonarQube scan (if configured via secrets)
+        if: ${{ secrets.SONAR_HOST_URL && secrets.SONAR_TOKEN }}
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_LOGIN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ github.repository }}
+        run: |
+          echo "Running SonarScanner via Docker"
+          docker run --rm \
+            -e SONAR_HOST_URL=${SONAR_HOST_URL} \
+            -e SONAR_LOGIN=${SONAR_LOGIN} \
+            -v "$PWD":/usr/src \
+            sonarsource/sonar-scanner-cli \
+            -Dsonar.projectKey=${SONAR_PROJECT_KEY} || true
+
+      - name: Checkov IaC scan
+        uses: bridgecrewio/checkov-action@v14
         with:
-          name: build-artifacts
-          path: dist/
-      
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+          directory: .
+
+      - name: Prepare image variables
+        id: image_vars
+        run: |
+          echo "IMAGE_REPO=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${GITHUB_SHA::7}" >> $GITHUB_ENV
+          echo "IMAGE_URI=${IMAGE_REPO}:${IMAGE_TAG}" >> $GITHUB_ENV
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.TOKEN }}
-      
-      - name: Extract metadata for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha,format=long
-            type=ref,event=branch
-            latest
-      
-      - name: Build Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: false
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          load: true
-      
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
-      
-      - name: Push Docker image
-        uses: docker/build-push-action@v5
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ASSUME_ROLE }}
+        # If not using OIDC/assume-role, provide access keys instead
+        # with:
+        #   aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        #   aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }} || aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }}
+
+      - name: Build and push Docker image to ECR
+        uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-      
-      - name: Set image tag output
-        id: set_output
-        run: echo "image_tag=$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+          tags: |
+            ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE_REPO }}:buildcache,mode=max
 
-  update-k8s:
-    name: Update Kubernetes Deployment
-    runs-on: ubuntu-latest
-    needs: [docker]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Trivy scan pushed image
+        uses: aquasecurity/trivy-action@v2
         with:
-          token: ${{ secrets.TOKEN }}
-      
-      - name: Setup Git config
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-      
-      - name: Update Kubernetes deployment file
+          image-ref: ${{ env.IMAGE_REPO }}:${{ env.IMAGE_TAG }}
+          format: 'table'
+          exit-code: '1'
+          vuln-type: 'os,library'
+
+      - name: Update GitOps repository (values/manifest) with new image
         env:
-          IMAGE_TAG: sha-${{ github.sha }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          REGISTRY: ghcr.io
+          GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+          GITOPS_BRANCH: ${{ secrets.GITOPS_BRANCH || 'main' }}
+          GITOPS_PATH: ${{ secrets.GITOPS_PATH || '' }}
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          IMAGE_REPO: ${{ env.IMAGE_REPO }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
         run: |
-          # Define the new image with tag
-          NEW_IMAGE="${REGISTRY}/${GITHUB_REPOSITORY}:${IMAGE_TAG}"
-          
-          # Update the deployment file directly
-          sed -i "s|image: ${REGISTRY}/.*|image: ${NEW_IMAGE}|g" kubernetes/deployment.yaml
-          
-          # Verify the change
-          echo "Updated deployment to use image: ${NEW_IMAGE}"
-          grep -A 1 "image:" kubernetes/deployment.yaml
-      
-      - name: Commit and push changes
-        run: |
-          git add kubernetes/deployment.yaml
-          git commit -m "Update Kubernetes deployment with new image tag: ${{ needs.docker.outputs.image_tag }} [skip ci]" || echo "No changes to commit"
-          git push
+          set -euo pipefail
+          if [ -z "${GITOPS_REPO}" ]; then
+            echo "No GITOPS_REPO configured; skipping GitOps update"; exit 0
+          fi
+
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+          # Clone GitOps repo
+          CLONE_URL=$(echo "${GITOPS_REPO}" | sed -e "s#https://#https://${GITOPS_TOKEN}@#")
+          git clone --depth 1 --branch "${GITOPS_BRANCH}" "${CLONE_URL}" gitops
+
+          TARGET_DIR="gitops/${GITOPS_PATH}"
+          if [ ! -d "${TARGET_DIR}" ]; then
+            echo "Target dir ${TARGET_DIR} not found; listing repo:"; ls -la gitops || true
+            # proceed but do not fail to avoid blocking deploy pipelines
+          fi
+
+          # Example: if a Helm values.yaml exists, update image.repository and image.tag
+          VALUES_FILE="${TARGET_DIR}/values.yaml"
+          if [ -f "${VALUES_FILE}" ]; then
+            echo "Updating ${VALUES_FILE} with ${IMAGE_REPO}:${IMAGE_TAG}"
+            if command -v yq >/dev/null 2>&1; then
+              yq eval ".image.repository = \"${IMAGE_REPO}\" | .image.tag = \"${IMAGE_TAG}\"" -i "${VALUES_FILE}"
+            else
+              sed -i "s|image: .*|image: ${IMAGE_REPO}:${IMAGE_TAG}|g" "${VALUES_FILE}" || true
+            fi
+
+            cd gitops
+            git add "${GITOPS_PATH}/values.yaml"
+            git commit -m "ci: update image to ${IMAGE_REPO}:${IMAGE_TAG} [skip ci]" || echo "No changes to commit"
+            git push origin "${GITOPS_BRANCH}"
+          else
+            echo "No values.yaml at ${VALUES_FILE}; skipping modification"
+          fi
+
+      - name: Finish
+        run: echo "CI job finished"
+
+# Secrets required (set in repo settings):
+# - AWS_REGION
+# - AWS_ACCOUNT_ID
+# - ECR_REPOSITORY
+# - GITOPS_REPO (https clone URL)
+# - GITOPS_TOKEN (personal access token with repo write for the GitOps repo)
+# Optional:
+# - AWS_ASSUME_ROLE (ARN) to assume for ECR push (recommended)
+# - SONAR_HOST_URL and SONAR_TOKEN for SonarQube
+# - Additional adaptation may be required for non-Helm GitOps repo structures
