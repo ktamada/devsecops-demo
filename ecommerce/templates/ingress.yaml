@@ -18,7 +18,7 @@ spec:
             pathType: ImplementationSpecific
             backend:
               service:
-                name: {{ include "ecommerce.fullname" $. }}
+                name: {{ include "ecommerce.fullname" $ }}
                 port:
                   number: {{ $.Values.service.port }}
           {{- end }}
