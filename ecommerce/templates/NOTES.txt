@@ -1,0 +1,36 @@
+{{- if .Values.ingress.enabled }}
+1. Get the application URL:
+
+   NOTE: this uses the first host configured on the Ingress.
+
+   HOST=$(kubectl get ingress {{ include "ecommerce.fullname" . }} -o jsonpath='{.spec.rules[0].host}')
+   printf "Application URL: http://%s\n" "$HOST"
+
+{{- else }}
+1. To access the application locally, port-forward the service:
+
+   kubectl port-forward svc/{{ include "ecommerce.fullname" . }} 8080:{{ .Values.service.port | default 80 }} &
+
+   Open your browser at: http://localhost:8080
+
+{{- end }}
+
+2. Check the release status and resources:
+
+   helm status {{ .Release.Name }}
+   kubectl get all -l app.kubernetes.io/instance={{ .Release.Name }}
+
+3. Watch pod startup and view logs:
+
+   kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }} -w
+   kubectl logs -l app.kubernetes.io/instance={{ .Release.Name }} --tail=200
+
+4. Useful one-liners:
+
+   # Describe a failing pod
+   kubectl describe pod $(kubectl get pods -l app.kubernetes.io/instance={{ .Release.Name }} -o jsonpath='{.items[0].metadata.name}')
+
+   # Forward a specific pod port instead of the service
+   kubectl port-forward $(kubectl get pod -l app.kubernetes.io/instance={{ .Release.Name }} -o jsonpath='{.items[0].metadata.name}') 8080:{{ .Values.service.port | default 80 }}
+
+If these instructions need to reference a different helper name than "ecommerce.fullname" or your service port is set under a different values key, update this file accordingly.

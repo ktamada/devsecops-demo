@@ -1,0 +1,11 @@
+# Development environment overrides for ecommerce chart
+# Keep this file minimal; set only values that differ from values.yaml
+replicaCount: 1
+
+# Development environment overrides for ecommerce chart
+# Keep this file minimal; set only values that differ from values.yaml
+replicaCount: 1
+
+image:
+  repository: 797240615708.dkr.ecr.ap-south-1.amazonaws.com/ecommerce
+  tag: "latest"

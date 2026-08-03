@@ -1,0 +1,53 @@
+# Default values for ecommerce.
+# This is a starting point — adjust to your needs.
+replicaCount: 2
+
+image:
+  repository: nginx
+  tag: "stable"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  annotations: {}
+  hosts:
+    - host: chart-example.local
+      paths:
+        - /
+  tls: []
+
+resources: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+livenessProbe:
+  enabled: true
+  path: /
+  port: 80
+  initialDelaySeconds: 30
+  periodSeconds: 10
+
+readinessProbe:
+  enabled: true
+  path: /
+  port: 80
+  initialDelaySeconds: 5
+  periodSeconds: 10

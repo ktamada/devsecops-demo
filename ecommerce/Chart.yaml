@@ -1,0 +1,13 @@
+apiVersion: v2
+name: ecommerce
+description: A Helm chart for the ecommerce application
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+icon: ""
+keywords:
+  - ecommerce
+  - web
+maintainers:
+  - name: your-team
+    email: ops@example.com
