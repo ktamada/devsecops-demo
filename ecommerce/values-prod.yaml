@@ -1,0 +1,3 @@
+# Production environment overrides for ecommerce chart
+# Increase replicas and tune resources for production
+replicaCount: 5
